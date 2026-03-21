@@ -1,8 +1,8 @@
 {
   "id": "agentdog",
   "name": "AgentDog",
-  "description": "Monitor your AI agent with AgentDog - real-time observability",
-  "version": "0.1.0",
+  "description": "Monitor your AI agent with AgentDog — real-time observability and permission controls",
+  "version": "0.2.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -18,8 +18,13 @@
       },
       "syncInterval": {
         "type": "number",
-        "default": 300,
-        "description": "Metadata sync interval in seconds"
+        "default": 86400,
+        "description": "Config metadata sync interval in seconds (default: 24 h)"
+      },
+      "permissionsEnabled": {
+        "type": "boolean",
+        "default": false,
+        "description": "Enforce tool-level permission rules defined in the AgentDog dashboard"
       }
     },
     "required": ["apiKey"]
@@ -34,7 +39,10 @@
       "label": "API Endpoint"
     },
     "syncInterval": {
-      "label": "Sync Interval (seconds)"
+      "label": "Config Sync Interval (seconds)"
+    },
+    "permissionsEnabled": {
+      "label": "Enable Permissions"
     }
   }
 }
