@@ -479,16 +479,15 @@ export default function register(api: any) {
   // ── Activity tracker helpers ─────────────────────────────────────────────
 
   function formatActivityMessage(tracker: ActivityTracker): string {
-    const lines: string[] = [];
-    for (const step of tracker.steps) {
-      const icon = step.status === 'running' ? '⏳'
-        : step.status === 'done' ? '✅'
-        : step.status === 'error' ? '❌'
-        : '⚠️';
-      const duration = step.durationMs != null ? ` (${(step.durationMs / 1000).toFixed(1)}s)` : '';
-      lines.push(`${icon} \`${step.tool}\` — ${step.summary}${duration}`);
-    }
-    return lines.join('\n');
+    // Only show the latest step
+    const step = tracker.steps[tracker.steps.length - 1];
+    if (!step) return '';
+    const icon = step.status === 'running' ? '⏳'
+      : step.status === 'done' ? '✅'
+      : step.status === 'error' ? '❌'
+      : '⚠️';
+    const duration = step.durationMs != null ? ` (${(step.durationMs / 1000).toFixed(1)}s)` : '';
+    return `${icon} \`${step.tool}\` — ${step.summary}${duration}`;
   }
 
   async function sendOrUpdateActivity(sessionKey: string) {
@@ -502,7 +501,6 @@ export default function register(api: any) {
     const { channel, peerId } = origin;
     const sk = sessionKey || 'agent:main:main';
     const stopButton = [{ text: '🛑 Stop', callback_data: `${STOP_NAMESPACE}:stop:${sk}` }];
-
     const hasRunning = tracker.steps.some((s) => s.status === 'running');
     const buttons = hasRunning ? [stopButton] : undefined;
 
@@ -510,24 +508,26 @@ export default function register(api: any) {
       const runtime = api.runtime;
       if (!runtime?.channel) return;
 
-      // Try to edit existing message first
-      if (tracker.editFn) {
-        await tracker.editFn(text, buttons ? { buttons } : undefined);
+      // Edit existing message if we have a reference
+      if (tracker.messageRef && channel === 'telegram') {
+        const ref = tracker.messageRef as { chatId: string; messageId: string };
+        await runtime.channel.telegram.conversationActions.editMessage(
+          ref.chatId, ref.messageId, text, { buttons },
+        );
         return;
       }
 
-      // Send new message and capture edit function
-      // We need to use sendMessageTelegram which returns the sent message,
-      // but the plugin API doesn't give us an edit handle directly.
-      // Instead, we'll send a new message each time (first time only).
-      const senders: Record<string, () => Promise<unknown>> = {
-        telegram: () => runtime.channel.telegram?.sendMessageTelegram(peerId, text, { buttons }),
-        slack: () => runtime.channel.slack?.sendMessageSlack(peerId, text, { buttons }),
-        discord: () => runtime.channel.discord?.sendMessageDiscord(peerId, text, { buttons }),
-      };
-
-      const send = senders[channel];
-      if (send) await send();
+      // First time: send new message and capture the reference for future edits
+      if (channel === 'telegram' && runtime.channel.telegram?.sendMessageTelegram) {
+        const result = await runtime.channel.telegram.sendMessageTelegram(peerId, text, { buttons });
+        if (result?.messageId) {
+          tracker.messageRef = { chatId: result.chatId || peerId, messageId: result.messageId };
+        }
+      } else if (channel === 'slack' && runtime.channel.slack?.sendMessageSlack) {
+        await runtime.channel.slack.sendMessageSlack(peerId, text, { buttons });
+      } else if (channel === 'discord' && runtime.channel.discord?.sendMessageDiscord) {
+        await runtime.channel.discord.sendMessageDiscord(peerId, text, { buttons });
+      }
     } catch {}
   }
 
@@ -776,8 +776,7 @@ export default function register(api: any) {
       // Send inline buttons (fire-and-forget, non-blocking)
       notifyChannelApproval(toolName, params, approvalId, sessionKey).catch(() => {});
 
-      // Also send a stop button so user can halt further tool calls
-      sendStopButton(sessionKey).catch(() => {});
+      // Stop button is included in the activity tracker message — no separate send needed.
 
       return {
         block: true,
