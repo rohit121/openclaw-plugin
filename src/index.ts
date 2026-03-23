@@ -869,4 +869,4 @@ export default function register(api: any) {
 // Plugin metadata
 export const id = 'agentdog';
 export const name = 'AgentDog';
-export const version = '0.10.0';
+export const version = '0.10.1';
