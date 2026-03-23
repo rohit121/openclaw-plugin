@@ -15,9 +15,11 @@ npm install -g @agentdog/openclaw
 
 **3. Add to `openclaw.yaml`**
 ```yaml
-extensions:
-  agentdog:
-    apiKey: YOUR_API_KEY
+plugins:
+  entries:
+    agentdog:
+      config:
+        apiKey: YOUR_API_KEY
 ```
 
 **4. Restart your agent** — done! Check the [dashboard](https://agentdog.io).
@@ -43,10 +45,12 @@ Allow, block, or require manual approval before any tool runs. Useful when you w
 
 **Enable in `openclaw.yaml`:**
 ```yaml
-extensions:
-  agentdog:
-    apiKey: YOUR_API_KEY
-    permissionsEnabled: true
+plugins:
+  entries:
+    agentdog:
+      config:
+        apiKey: YOUR_API_KEY
+        permissionsEnabled: true
 ```
 
 **Configure rules in the [AgentDog dashboard](https://agentdog.io/permissions):**
@@ -73,12 +77,15 @@ Approval requests expire after **10 minutes** if not decided.
 ## All config options
 
 ```yaml
-extensions:
-  agentdog:
-    apiKey: ad_xxxxxxxxxxxxx        # required
-    endpoint: https://agentdog.io/api/v1  # optional, default shown
-    syncInterval: 86400             # seconds between config syncs (default: 24 h)
-    permissionsEnabled: false       # set true to enforce permission rules
+plugins:
+  entries:
+    agentdog:
+      config:
+        apiKey: ad_xxxxxxxxxxxxx        # required
+        endpoint: https://agentdog.io/api/v1  # optional, default shown
+        syncInterval: 86400             # seconds between config syncs (default: 24 h)
+        permissionsEnabled: false       # set true to enforce permission rules
+        agentName: my-agent             # optional display name in dashboard
 ```
 
 ---

@@ -25,6 +25,10 @@
         "type": "boolean",
         "default": false,
         "description": "Enforce tool-level permission rules defined in the AgentDog dashboard"
+      },
+      "agentName": {
+        "type": "string",
+        "description": "Display name for this agent in the AgentDog dashboard"
       }
     },
     "required": ["apiKey"]
@@ -43,6 +47,10 @@
     },
     "permissionsEnabled": {
       "label": "Enable Permissions"
+    },
+    "agentName": {
+      "label": "Agent Name",
+      "placeholder": "my-agent"
     }
   }
 }
