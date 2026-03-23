@@ -1,6 +1,6 @@
 {
   "name": "@agentdog/openclaw",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "AgentDog observability plugin for OpenClaw - monitor your AI agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
