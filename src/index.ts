@@ -6,10 +6,12 @@
  * Features:
  *   - Real-time session, message, tool-call, and usage tracking
  *   - Per-tool permission rules (allow / block / require_approval)
- *   - Approval flow: pauses the agent and notifies the user in the originating channel
- *     (Telegram, Slack, Discord) or via the AgentDog dashboard
- *   - Inline approve/deny via channel reply ("approve" / "deny")
+ *   - Non-blocking approval flow with inline buttons (Telegram, Slack, Discord)
+ *   - Fallback: text reply ("approve" / "deny") via inbound_claim
  */
+
+// Interactive button namespace — callback_data format: "agentdog-approval:<approvalId>:<decision>"
+const INTERACTIVE_NAMESPACE = 'agentdog-approval';
 
 // ─── Plugin state ────────────────────────────────────────────────────────────
 
@@ -22,11 +24,15 @@ let registrationAttempts = 0;
 const MAX_REGISTRATION_ATTEMPTS = 3;
 
 // Trace tracking — maps sessionKey → current traceId
-// Traces group related events: user message → tool calls → assistant response
 const sessionTraces = new Map<string, string>();
 
-// Pending approvals — maps conversationId → approval metadata
-// Used by the inbound_claim hook so users can approve/deny via channel reply
+// Session origin tracking — maps sessionKey → { channel, peerId }
+// Populated from message_received; used to resolve the originating channel
+// when the session key doesn't contain peer info (e.g. "agent:main:main").
+const sessionOrigins = new Map<string, { channel: string; peerId: string }>();
+
+// Pending approvals — maps peerId/conversationId → approval metadata
+// Used by the inbound_claim hook for text-based approve/deny fallback.
 const pendingApprovals = new Map<string, {
   approvalId: string;
   toolName: string;
@@ -50,18 +56,13 @@ function getOrCreateTraceId(sessionKey: string | undefined): string {
 }
 
 function clearTraceId(sessionKey: string | undefined): void {
-  const key = sessionKey || 'default';
-  sessionTraces.delete(key);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  sessionTraces.delete(sessionKey || 'default');
 }
 
 /**
- * Parse a sessionKey of the form:
+ * Parse a channel-specific session key:
  *   agent:<agentId>:<channel>:<chatType>:<peerId>
- * Returns { channel, peerId } or null if the key doesn't match the expected format.
+ * Returns { channel, peerId } or null for non-channel keys (e.g. "agent:main:main").
  */
 function parseSessionKey(sessionKey: string): { channel: string; peerId: string } | null {
   const parts = sessionKey.split(':');
@@ -70,8 +71,15 @@ function parseSessionKey(sessionKey: string): { channel: string; peerId: string 
 }
 
 /**
- * Extract safe channel info (no tokens/secrets)
+ * Resolve the originating channel and peer ID for a session.
+ * Tries the session key first, then falls back to tracked origins.
  */
+function resolveOrigin(sessionKey: string | undefined): { channel: string; peerId: string } | null {
+  if (!sessionKey) return null;
+  return parseSessionKey(sessionKey) || sessionOrigins.get(sessionKey) || null;
+}
+
+/** Extract safe channel info (no tokens/secrets) */
 function getSafeChannels(channels: Record<string, any> | undefined): Record<string, unknown> {
   if (!channels) return {};
   const safe: Record<string, unknown> = {};
@@ -87,9 +95,7 @@ function getSafeChannels(channels: Record<string, any> | undefined): Record<stri
   return safe;
 }
 
-/**
- * Extract plugin names (no configs/secrets)
- */
+/** Extract plugin names (no configs/secrets) */
 function getPluginNames(plugins: Record<string, any> | undefined): string[] {
   if (!plugins?.entries) return [];
   return Object.entries(plugins.entries)
@@ -114,7 +120,6 @@ async function sendToAgentDog(
   method: 'POST' | 'GET' = 'POST',
 ): Promise<unknown> {
   if (!apiKey) return null;
-
   try {
     const response = await fetch(`${endpoint}${path}`, {
       method,
@@ -124,13 +129,11 @@ async function sendToAgentDog(
       },
       body: method === 'POST' ? JSON.stringify(data) : undefined,
     });
-
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       logger?.warn?.(`[agentdog] API error ${response.status}: ${text.substring(0, 200)}`);
       return null;
     }
-
     return await response.json();
   } catch (error) {
     logger?.error?.(`[agentdog] Request failed: ${String(error)}`);
@@ -145,14 +148,13 @@ export default function register(api: any) {
 
   const apiKey: string = cfg.apiKey || '';
   const endpoint: string = cfg.endpoint || 'https://agentdog.io/api/v1';
-  const syncInterval: number = (cfg.syncInterval || 86400) * 1000; // default 24 h
+  const syncInterval: number = (cfg.syncInterval || 86400) * 1000;
   const permissionsEnabled: boolean = cfg.permissionsEnabled ?? false;
 
   if (!apiKey) {
     api.logger?.error?.('[agentdog] No API key configured — plugin disabled');
     return;
   }
-
   if (!apiKey.startsWith('ad_')) {
     api.logger?.error?.('[agentdog] Invalid API key format — must start with "ad_"');
     return;
@@ -167,7 +169,6 @@ export default function register(api: any) {
 
   const registerAgent = async (): Promise<boolean> => {
     if (agentId) return true;
-
     if (registrationAttempts >= MAX_REGISTRATION_ATTEMPTS) {
       api.logger?.warn?.(`[agentdog] Max registration attempts (${MAX_REGISTRATION_ATTEMPTS}) reached`);
       return false;
@@ -176,9 +177,8 @@ export default function register(api: any) {
     registrationAttempts++;
     api.logger?.info?.(`[agentdog] Registration attempt ${registrationAttempts}/${MAX_REGISTRATION_ATTEMPTS}`);
 
-    const agentName = cfg.agentName || 'openclaw';
     const result = await sendToAgentDog(endpoint, apiKey, '/agents/register', {
-      name: agentName,
+      name: cfg.agentName || 'openclaw',
       type: 'openclaw',
       metadata: { workspace: api.config?.agents?.defaults?.workspace },
     }, api.logger) as { agent_id?: string } | null;
@@ -202,7 +202,6 @@ export default function register(api: any) {
 
   const syncConfig = async () => {
     if (!await ensureRegistered()) return;
-
     const config = api.config;
     await sendToAgentDog(endpoint, apiKey, `/agents/${agentId}/config`, {
       version: config?.meta?.lastTouchedVersion,
@@ -269,20 +268,22 @@ export default function register(api: any) {
   // ── Channel notification helper ─────────────────────────────────────────
 
   /**
-   * Send an approval request notification to the originating channel.
-   * Falls back silently if the channel is not supported or runtime is unavailable.
+   * Send an approval notification with inline buttons to the originating channel.
+   * Falls back silently if the channel is unavailable.
    */
   const notifyChannelApproval = async (
     toolName: string,
     params: Record<string, unknown>,
+    approvalId: string,
     sessionKey: string | undefined,
   ) => {
-    if (!sessionKey) return;
-    const parsed = parseSessionKey(sessionKey);
-    if (!parsed) return;
+    const origin = resolveOrigin(sessionKey);
+    if (!origin) {
+      api.logger?.warn?.(`[agentdog] Cannot send approval buttons: no origin for session ${sessionKey}`);
+      return;
+    }
 
-    const { channel, peerId } = parsed;
-
+    const { channel, peerId } = origin;
     const argsSummary = Object.keys(params).length > 0
       ? '\n' + JSON.stringify(params, null, 2).slice(0, 300)
       : '';
@@ -291,27 +292,75 @@ export default function register(api: any) {
       `⚠️ *Approval needed*`,
       ``,
       `Your agent wants to run: \`${toolName}\`${argsSummary}`,
-      ``,
-      `Reply *approve* to allow or *deny* to block.`,
-      `Or decide at: https://agentdog.io/permissions`,
     ].join('\n');
+
+    const buttons = [[
+      { text: '✅ Approve', callback_data: `${INTERACTIVE_NAMESPACE}:${approvalId}:approved` },
+      { text: '❌ Deny', callback_data: `${INTERACTIVE_NAMESPACE}:${approvalId}:denied` },
+    ]];
 
     try {
       const runtime = api.runtime;
       if (!runtime?.channel) return;
 
-      if (channel === 'telegram' && runtime.channel.telegram?.sendMessageTelegram) {
-        await runtime.channel.telegram.sendMessageTelegram(peerId, text, { cfg: api.config });
-      } else if (channel === 'slack' && runtime.channel.slack?.sendMessageSlack) {
-        await runtime.channel.slack.sendMessageSlack(peerId, text, { cfg: api.config });
-      } else if (channel === 'discord' && runtime.channel.discord?.sendMessageDiscord) {
-        await runtime.channel.discord.sendMessageDiscord(peerId, text, { cfg: api.config });
-      }
-      // Other channels (whatsapp, zalo, etc.) fall through — dashboard-only
+      const senders: Record<string, () => Promise<void>> = {
+        telegram: () => runtime.channel.telegram?.sendMessageTelegram(peerId, text, { buttons }),
+        slack: () => runtime.channel.slack?.sendMessageSlack(peerId, text, { buttons }),
+        discord: () => runtime.channel.discord?.sendMessageDiscord(peerId, text, { buttons }),
+      };
+
+      const send = senders[channel];
+      if (send) await send();
     } catch (err) {
-      api.logger?.warn?.(`[agentdog] Could not send channel notification: ${String(err)}`);
+      api.logger?.warn?.(`[agentdog] Could not send approval buttons: ${String(err)}`);
     }
   };
+
+  // ── Interactive button handler ──────────────────────────────────────────
+
+  /**
+   * Handle approve/deny button clicks. Registered for all supported channels.
+   * Callback data format: "agentdog-approval:<approvalId>:<decision>"
+   */
+  const handleApprovalButton = async (event: any) => {
+    const payload: string = event.callback?.payload || '';
+    const sepIdx = payload.indexOf(':');
+    if (sepIdx < 0) return;
+
+    const approvalId = payload.slice(0, sepIdx);
+    const decision = payload.slice(sepIdx + 1);
+    if (!['approved', 'denied'].includes(decision)) return;
+
+    api.logger?.info?.(`[agentdog] Button ${decision} for approval ${approvalId}`);
+
+    await sendToAgentDog(
+      endpoint, apiKey,
+      `/agents/${agentId}/permissions/check/${approvalId}/decide`,
+      { decision, note: `Decided via inline button (${event.channel || 'unknown'})` },
+      api.logger,
+    );
+
+    // Update the message to show the decision and remove buttons
+    const label = decision === 'approved' ? '✅ Approved' : '❌ Denied';
+    try {
+      await event.respond?.editMessage?.({
+        text: `${event.callback?.messageText ?? '⚠️ Approval needed'}\n\n${label}`,
+      });
+    } catch {
+      try { await event.respond?.clearButtons?.(); } catch {}
+    }
+  };
+
+  if (permissionsEnabled && api.registerInteractiveHandler) {
+    for (const channel of ['telegram', 'slack', 'discord'] as const) {
+      api.registerInteractiveHandler({
+        namespace: INTERACTIVE_NAMESPACE,
+        channel,
+        handler: handleApprovalButton,
+      });
+    }
+    api.logger?.info?.('[agentdog] Interactive approval handlers registered');
+  }
 
   // ── Lifecycle events ────────────────────────────────────────────────────
 
@@ -345,6 +394,18 @@ export default function register(api: any) {
   // ── Message tracking ────────────────────────────────────────────────────
 
   api.on('message_received', async (event: any) => {
+    // Track originating channel + peer for approval notifications.
+    // The main session key ("agent:main:main") doesn't contain peer info,
+    // so we store it from the inbound message metadata.
+    const senderId = event.metadata?.senderId || event.from;
+    const channel = event.channel || event.metadata?.provider || event.metadata?.originatingChannel;
+    const sessionKey = event.sessionKey || 'agent:main:main';
+    if (channel && senderId) {
+      const origin = { channel, peerId: String(senderId) };
+      sessionOrigins.set(sessionKey, origin);
+      sessionOrigins.set('agent:main:main', origin);
+    }
+
     clearTraceId(event.sessionKey);
     const traceId = getOrCreateTraceId(event.sessionKey);
     await sendEvent('message', event.sessionKey, {
@@ -407,26 +468,27 @@ export default function register(api: any) {
 
   /**
    * before_tool_call — enforce permission rules before each tool runs.
-   * Returns { block: true, blockReason } to prevent execution,
-   * or void/undefined to allow.
    *
-   * Only active when permissionsEnabled = true in plugin config.
+   * - allow: tool runs normally
+   * - block: tool is rejected with reason
+   * - pending (require_approval): sends inline buttons, blocks immediately.
+   *   The agent can continue chatting; user approves via buttons and asks
+   *   the agent to retry.
    */
   api.on('before_tool_call', async (event: any, ctx: any) => {
     if (!permissionsEnabled) return;
-    if (!await ensureRegistered()) return; // fail open: allow if not registered
+    if (!await ensureRegistered()) return;
 
     const toolName: string = event.toolName || ctx.toolName;
     const params: Record<string, unknown> = event.params || {};
     const sessionKey: string | undefined = ctx.sessionKey;
 
-    // 1. Check permission
     const result = await sendToAgentDog(
       endpoint, apiKey,
       `/agents/${agentId}/permissions/check`,
       { tool_name: toolName, arguments: params, session_id: sessionKey },
       api.logger,
-    ) as { decision: string; reason?: string; approval_id?: string; poll_interval_ms?: number } | null;
+    ) as { decision: string; reason?: string; approval_id?: string } | null;
 
     if (!result) return; // network failure → fail open
 
@@ -439,72 +501,36 @@ export default function register(api: any) {
 
     if (result.decision === 'pending') {
       const approvalId = result.approval_id!;
-      const pollIntervalMs = result.poll_interval_ms || 3000;
-      const deadline = Date.now() + 11 * 60 * 1000; // 11 min (server expires in 10)
-
       api.logger?.info?.(`[agentdog] Approval required for ${toolName} (id=${approvalId})`);
 
-      // Store so the inbound_claim hook can resolve it from a channel reply
-      const parsed = parseSessionKey(sessionKey || '');
-      const approvalKey = parsed?.peerId || sessionKey || approvalId;
-      pendingApprovals.set(approvalKey, { approvalId, toolName, expires: deadline });
+      // Store for text-based fallback via inbound_claim
+      const origin = resolveOrigin(sessionKey);
+      const approvalKey = origin?.peerId || sessionKey || approvalId;
+      pendingApprovals.set(approvalKey, {
+        approvalId,
+        toolName,
+        expires: Date.now() + 10 * 60 * 1000,
+      });
 
-      // Notify user in originating channel
-      await notifyChannelApproval(toolName, params, sessionKey);
+      // Send inline buttons (fire-and-forget, non-blocking)
+      notifyChannelApproval(toolName, params, approvalId, sessionKey).catch(() => {});
 
-      // 2. Poll until decided, expired, or deadline
-      try {
-        while (Date.now() < deadline) {
-          await sleep(pollIntervalMs);
-
-          const poll = await sendToAgentDog(
-            endpoint, apiKey,
-            `/agents/${agentId}/permissions/check/${approvalId}`,
-            {},
-            api.logger,
-            'GET',
-          ) as { status: string; decision_note?: string } | null;
-
-          if (!poll) continue; // transient error — keep polling
-
-          if (poll.status === 'approved') {
-            api.logger?.info?.(`[agentdog] ${toolName} approved`);
-            pendingApprovals.delete(approvalKey);
-            return; // allow
-          }
-
-          if (poll.status === 'denied') {
-            api.logger?.info?.(`[agentdog] ${toolName} denied`);
-            pendingApprovals.delete(approvalKey);
-            return { block: true, blockReason: poll.decision_note || `${toolName} was denied` };
-          }
-
-          if (poll.status === 'expired') {
-            pendingApprovals.delete(approvalKey);
-            return { block: true, blockReason: `Approval for ${toolName} timed out` };
-          }
-          // status === 'pending' → keep waiting
-        }
-      } finally {
-        pendingApprovals.delete(approvalKey);
-      }
-
-      return { block: true, blockReason: `Approval for ${toolName} timed out` };
+      return {
+        block: true,
+        blockReason: `⚠️ Approval required for ${toolName}. I've sent you approve/deny buttons. Once you approve, ask me to try again.`,
+      };
     }
   });
 
+  // ── Text-based approval fallback ────────────────────────────────────────
+
   /**
-   * inbound_claim — intercept "approve" / "deny" replies from the user
-   * in the originating channel before the agent processes them as a message.
-   *
-   * Returns { handled: true } to consume the message silently.
-   * Only active when permissionsEnabled = true.
+   * inbound_claim — intercept "approve" / "deny" text replies as a fallback
+   * for users who can't use inline buttons.
    */
   api.on('inbound_claim', async (event: any, ctx: any) => {
-    if (!permissionsEnabled) return;
-    if (!agentId) return;
+    if (!permissionsEnabled || !agentId) return;
 
-    // Try to match a pending approval for this conversation
     const conversationId: string | undefined = ctx.conversationId;
     if (!conversationId) return;
 
@@ -523,20 +549,18 @@ export default function register(api: any) {
       decision = 'denied';
     }
 
-    if (!decision) return; // not a decision reply — let agent handle it
+    if (!decision) return;
 
-    api.logger?.info?.(`[agentdog] Inbound ${decision} for approval ${pending.approvalId}`);
+    api.logger?.info?.(`[agentdog] Text ${decision} for approval ${pending.approvalId}`);
 
-    // Decide via agent-facing endpoint (uses API key, no session auth needed)
     await sendToAgentDog(
       endpoint, apiKey,
       `/agents/${agentId}/permissions/check/${pending.approvalId}/decide`,
-      { decision, note: `Decided via ${event.channel || 'channel'} reply` },
+      { decision, note: `Decided via ${event.channel || 'channel'} text reply` },
       api.logger,
     );
 
-    // The before_tool_call polling loop will see the updated status on next poll
-    // We do NOT delete from pendingApprovals here — let the polling loop do it
+    pendingApprovals.delete(conversationId);
     return { handled: true };
   });
 
@@ -561,7 +585,6 @@ export default function register(api: any) {
   });
 
   // ── Delayed init ────────────────────────────────────────────────────────
-  // Handles cases where gateway_start fired before the plugin was loaded
 
   setTimeout(async () => {
     if (!agentId) {
@@ -583,4 +606,4 @@ export default function register(api: any) {
 // Plugin metadata
 export const id = 'agentdog';
 export const name = 'AgentDog';
-export const version = '0.8.0';
+export const version = '0.9.0';
