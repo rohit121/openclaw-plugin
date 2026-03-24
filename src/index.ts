@@ -414,7 +414,7 @@ export default function register(api: any) {
 
       try {
         await event.respond?.editMessage?.({
-          text: '🛑 *Agent stopped*\n\nAll tool calls are blocked until you resume.',
+          text: '🛑 *Task aborted*\n\nRemaining steps for this task are cancelled. Send a new message to start a new task.',
           buttons: [[
             { text: '▶️ Resume', callback_data: `${STOP_NAMESPACE}:resume:${sessionKey}` },
           ]],
@@ -458,7 +458,7 @@ export default function register(api: any) {
     const sk = sessionKey || 'agent:main:main';
 
     const buttons = [[
-      { text: '🛑 Stop Agent', callback_data: `${STOP_NAMESPACE}:stop:${sk}` },
+      { text: '🛑 Abort', callback_data: `${STOP_NAMESPACE}:stop:${sk}` },
     ]];
 
     try {
@@ -511,7 +511,7 @@ export default function register(api: any) {
 
     const { channel, peerId } = origin;
     const sk = sessionKey || 'agent:main:main';
-    const stopButton = [{ text: '🛑 Stop', callback_data: `${STOP_NAMESPACE}:stop:${sk}` }];
+    const stopButton = [{ text: '🛑 Abort', callback_data: `${STOP_NAMESPACE}:stop:${sk}` }];
     const hasRunning = tracker.steps.some((s) => s.status === 'running');
     const buttons = hasRunning ? [stopButton] : undefined;
 
@@ -620,8 +620,10 @@ export default function register(api: any) {
       sessionOrigins.set('agent:main:main', origin);
     }
 
-    // Don't auto-clear emergency stop on message — only clear via Resume button.
-    // The user might be sending a follow-up message while the stop is active.
+    // Clear abort on new message — abort is per-task, not permanent.
+    // New message = new task = clean slate.
+    emergencyStops.delete(sessionKey);
+    emergencyStops.delete('agent:main:main');
 
     // Clear activity tracker for new turn
     const prevTracker = activityTrackers.get(sessionKey);
@@ -726,7 +728,7 @@ export default function register(api: any) {
       if (Date.now() - stop.stoppedAt > EMERGENCY_STOP_TTL_MS) {
         emergencyStops.delete(sessionKey || 'agent:main:main');
       } else {
-        return { block: true, blockReason: '🛑 Agent is stopped. The user tapped the stop button. Wait for them to resume or send a new message.' };
+        return { block: true, blockReason: '🛑 Task aborted. The user tapped abort. Stop this task immediately. If they ask something new, proceed normally.' };
       }
     }
 
