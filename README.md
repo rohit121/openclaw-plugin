@@ -35,6 +35,53 @@ extensions:
 
 ---
 
+## Permission Controls
+
+### 🛡️ Tool-Level Rules
+
+Set rules for any tool in the [dashboard](https://agentdog.io/permissions):
+
+- **Allow** — tool runs freely
+- **Block** — tool is always prevented
+- **Ask me** — agent pauses and sends you approve/deny buttons
+
+Rules support exact names (`send_email`), wildcards (`github.*`), or catch-all (`*`). Scope them per-agent or globally.
+
+**Bulk rule creation:** Select multiple capabilities and set permissions in one click.
+
+### ✅ Inline Approval Buttons
+
+When a tool needs approval:
+
+```
+⚠️ Approval needed
+
+Your agent wants to run: exec
+  {"command": "git push origin main"}
+
+[✅ Approve]  [❌ Deny]
+```
+
+- **Non-blocking** — the agent continues chatting while you decide
+- **One-tap** — tap a button, message updates to show your choice
+- **Text fallback** — reply `approve` or `deny` if buttons aren't available
+- **10-minute expiry** — auto-denies if no response
+
+### 🔍 Smart CLI Mapping
+
+AgentDog automatically maps CLI commands to apps for smarter rules:
+
+| Command | Maps to | Rule matches |
+|---------|---------|--------------|
+| `git push` | `github.push` | `github.*`, `github.push` |
+| `gh pr merge` | `github.pr.merge` | `github.*`, `github.pr.*` |
+| `docker run nginx` | `docker.run` | `docker.*`, `docker.run` |
+| `kubectl apply` | `kubectl.apply` | `kubectl.*`, `kubectl.apply` |
+
+**Auto-discovery:** Unknown CLI tools are automatically detected and their capabilities populated from public documentation.
+
+---
+
 ## In-Chat Observability
 
 ### ⏳ Live Activity Feed
@@ -85,53 +132,6 @@ All tool calls are blocked until you resume.
 - **Resume when ready** — tap ▶️ or just send a new message
 - **Auto-expires** after 5 minutes (safety net)
 - **No data loss** — conversations and context are preserved
-
----
-
-## Permission Controls
-
-### 🛡️ Tool-Level Rules
-
-Set rules for any tool in the [dashboard](https://agentdog.io/permissions):
-
-- **Allow** — tool runs freely
-- **Block** — tool is always prevented
-- **Ask me** — agent pauses and sends you approve/deny buttons
-
-Rules support exact names (`send_email`), wildcards (`github.*`), or catch-all (`*`). Scope them per-agent or globally.
-
-**Bulk rule creation:** Select multiple capabilities and set permissions in one click.
-
-### ✅ Inline Approval Buttons
-
-When a tool needs approval:
-
-```
-⚠️ Approval needed
-
-Your agent wants to run: exec
-  {"command": "git push origin main"}
-
-[✅ Approve]  [❌ Deny]
-```
-
-- **Non-blocking** — the agent continues chatting while you decide
-- **One-tap** — tap a button, message updates to show your choice
-- **Text fallback** — reply `approve` or `deny` if buttons aren't available
-- **10-minute expiry** — auto-denies if no response
-
-### 🔍 Smart CLI Mapping
-
-AgentDog automatically maps CLI commands to apps for smarter rules:
-
-| Command | Maps to | Rule matches |
-|---------|---------|--------------|
-| `git push` | `github.push` | `github.*`, `github.push` |
-| `gh pr merge` | `github.pr.merge` | `github.*`, `github.pr.*` |
-| `docker run nginx` | `docker.run` | `docker.*`, `docker.run` |
-| `kubectl apply` | `kubectl.apply` | `kubectl.*`, `kubectl.apply` |
-
-**Auto-discovery:** Unknown CLI tools are automatically detected and their capabilities populated from public documentation.
 
 ---
 
